@@ -284,6 +284,15 @@ if translated_text:
     else:
         st.info("VERDICT: (nie wykryto w raporcie — zajrzyj do treści review)")
 
-    st.text_area("Raport Review", value=st.session_state.get("review_report", ""), height=240)
+    report = st.session_state.get("review_report", "")
+if report:
+    st.markdown("**Raport Review (pełna treść):**")
+    st.markdown(
+        f"<div style='white-space: pre-wrap; padding: 12px; border: 1px solid rgba(49,51,63,0.2); border-radius: 8px;'>{report}</div>",
+        unsafe_allow_html=True
+    )
+else:
+    st.info("Brak raportu review.")
+
 else:
     st.info("Wklej tekst i kliknij Translate (auto-review).")
