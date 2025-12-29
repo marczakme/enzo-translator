@@ -1,10 +1,15 @@
 import streamlit as st
 import pandas as pd
 import os
+from datetime import datetime
+import shutil
 
 st.set_page_config(page_title="Glossary", layout="wide")
 st.header("2) Glossary (PL → język docelowy)")
 
+# -------------------------
+# Wymagamy języka/rynku
+# -------------------------
 target_lang = st.session_state.get("target_language")
 target_label = st.session_state.get("target_market_label")
 
@@ -14,8 +19,15 @@ if not target_lang or not target_label:
 
 st.subheader(f"Edytujesz glossary dla: {target_label} (lang={target_lang})")
 
+# -------------------------
+# Ścieżki plików
+# -------------------------
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
+
+BACKUP_DIR = os.path.join(DATA_DIR, "backup")
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
 glossary_path = os.path.join(DATA_DIR, f"glossary_{target_lang}.csv")
 
 DEFAULT_ROWS = [
@@ -25,18 +37,23 @@ DEFAULT_ROWS = [
 
 REQUIRED_COLS = ["term_pl", "term_target", "locked", "notes"]
 
+# -------------------------
+# Helpers
+# -------------------------
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    # ujednolicenie kolumn
+    """Ujednolica kolumny, typy, trim, usuwa puste i deduplikuje po term_pl."""
     df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
 
-    # mapowanie alternatywnych nazw (na wypadek importów)
+    # ujednolicenie nazw kolumn
+    df.columns = [str(c).strip().lower() for c in df.columns]
+
+    # mapowanie alternatywnych nazw (importy z różnych źródeł)
     rename_map = {
         "pl": "term_pl",
         "source": "term_pl",
         "term_source": "term_pl",
-        "target": "term_target",
         "term": "term_pl",
+        "target": "term_target",
         "translation": "term_target",
         "is_locked": "locked",
     }
@@ -44,26 +61,29 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         if k in df.columns and v not in df.columns:
             df = df.rename(columns={k: v})
 
-    # brakujące kolumny
+    # uzupełnij brakujące kolumny
     for col in REQUIRED_COLS:
         if col not in df.columns:
             df[col] = "" if col != "locked" else False
 
     df = df[REQUIRED_COLS]
 
-    # typy + trim
+    # typy i czyszczenie
     df["term_pl"] = df["term_pl"].astype(str).str.strip()
     df["term_target"] = df["term_target"].astype(str).str.strip()
     df["notes"] = df["notes"].astype(str)
-    df["locked"] = df["locked"].astype(bool)
+    # locked bywa "TRUE"/"FALSE" albo 1/0; bool() na stringu nie zadziała jak chcesz,
+    # więc robimy mapowanie bezpieczne:
+    df["locked"] = df["locked"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes", "y", "t"])
 
-    # usuń puste wiersze (bez term_pl)
+    # usuń puste term_pl
     df = df[df["term_pl"].str.len() > 0].copy()
 
-    # deduplikacja po term_pl (zostaw ostatni)
+    # deduplikacja po term_pl: zostaw ostatni (import ma priorytet)
     df = df.drop_duplicates(subset=["term_pl"], keep="last").reset_index(drop=True)
 
     return df
+
 
 def load_glossary(path: str) -> pd.DataFrame:
     if os.path.exists(path):
@@ -71,29 +91,65 @@ def load_glossary(path: str) -> pd.DataFrame:
         return normalize_df(df)
     return pd.DataFrame(DEFAULT_ROWS)
 
+
 def save_glossary(df: pd.DataFrame, path: str) -> None:
     df = normalize_df(df)
     df.to_csv(path, index=False)
 
+
 def merge_glossaries(existing: pd.DataFrame, imported: pd.DataFrame) -> pd.DataFrame:
-    # imported ma priorytet (nadpisuje term_target/locked/notes)
+    """MERGE: łączy po term_pl, import ma priorytet (nadpisuje duplikaty)."""
     ex = normalize_df(existing)
     im = normalize_df(imported)
     merged = pd.concat([ex, im], ignore_index=True)
     merged = merged.drop_duplicates(subset=["term_pl"], keep="last").reset_index(drop=True)
     return merged
 
-# session key per język
+
+def backup_glossary(path: str, lang: str):
+    """Backup obecnego glossary przed overwrite."""
+    if not os.path.exists(path):
+        return None
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    backup_name = f"glossary_{lang}_{ts}.csv"
+    backup_path = os.path.join(BACKUP_DIR, backup_name)
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+# -------------------------
+# Session state per język
+# -------------------------
 state_key = f"glossary_df_{target_lang}"
 if state_key not in st.session_state:
     st.session_state[state_key] = load_glossary(glossary_path)
 
 # -------------------------
-# Import / Export UI
+# Instrukcja dla użytkowników (UI)
+# -------------------------
+st.info(
+    """
+### Jak wybrać tryb importu?
+
+**Scal (merge) — ZALECANE (najbezpieczniejsze)**
+- dodajesz nowe frazy
+- poprawiasz istniejące tłumaczenia
+- chcesz zachować wcześniejszą pracę  
+➡️ nic nie ginie; jeśli `term_pl` się powtarza, import **nadpisze** jego tłumaczenie
+
+**Nadpisz (overwrite) — OSTROŻNIE**
+- zastępuje CAŁE glossary dla tego języka
+- używaj tylko przy pełnym resecie lub gdy CSV ma kompletną, finalną wersję  
+➡️ aplikacja automatycznie robi **backup** poprzedniej wersji do `/data/backup`
+"""
+)
+
+# -------------------------
+# Import / Export
 # -------------------------
 st.markdown("### Import / Export")
 
-c1, c2, c3 = st.columns([2, 2, 3])
+c1, c2, c3 = st.columns([2, 3, 3])
 
 with c1:
     st.download_button(
@@ -107,14 +163,17 @@ with c2:
     uploaded = st.file_uploader(
         "⬆️ Import CSV (dla tego języka)",
         type=["csv"],
-        help="CSV powinien mieć kolumny: term_pl, term_target, locked, notes (locked = True/False)."
+        help="CSV powinien mieć kolumny: term_pl, term_target, locked, notes (locked: True/False lub 1/0)."
     )
 
 with c3:
     import_mode = st.radio(
         "Tryb importu",
-        options=["Scal (merge) — nadpisuj te same term_pl", "Nadpisz (overwrite) — zastąp cały glossary"],
-        horizontal=False
+        options=[
+            "Scal (merge) — nadpisuj te same term_pl",
+            "Nadpisz (overwrite) — zastąp cały glossary",
+        ],
+        index=0
     )
 
 if uploaded is not None:
@@ -128,8 +187,14 @@ if uploaded is not None:
         if st.button("Zastosuj import", type="primary"):
             if import_mode.startswith("Scal"):
                 new_df = merge_glossaries(st.session_state[state_key], imported_df)
+                st.info("Zastosowano MERGE: zachowano istniejące terminy, a duplikaty zaktualizowano.")
             else:
+                backup_path = backup_glossary(glossary_path, target_lang)
                 new_df = imported_df
+                if backup_path:
+                    st.warning(f"OVERWRITE: wykonano backup poprzedniego glossary → {backup_path}")
+                else:
+                    st.warning("OVERWRITE: nie było wcześniejszego pliku do zbackupowania (to pierwszy zapis).")
 
             st.session_state[state_key] = new_df
             save_glossary(new_df, glossary_path)
