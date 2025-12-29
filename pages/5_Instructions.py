@@ -24,16 +24,16 @@ nawet jeśli nie znasz języka docelowego.
 
 ---
 
-## 1) Configuration — ustawienia języka i kontekstu
+## 1) Configuration >> ustawienia języka i kontekstu
 W tej zakładce:
 - wybierasz **język / rynek docelowy**,
 - (opcjonalnie) podajesz **kontekst stylistyczny** (np. „sprzęt fryzjerski, ton profesjonalny, bez marketingowego lania wody”).
 
-⚠️ Zawsze zaczynaj od Configuration — wszystkie kolejne zakładki działają **per wybrany język**.
+⚠️ Zawsze zaczynaj od Configuration - wszystkie kolejne zakładki działają **per wybrany język**.
 
 ---
 
-## 2) Glossary — kluczowy element jakości tłumaczeń
+## 2) Glossary >> kluczowy element jakości tłumaczeń
 Glossary to Twoja **baza wiedzy terminologicznej** (PL → język docelowy).
 
 Każdy wpis składa się z:
@@ -94,7 +94,7 @@ Ustaw `locked = True`, gdy termin:
 - **nie zastępuje go synonimami**,
 - **pozwala na naturalną odmianę gramatyczną**.
 
-> **`locked` nie blokuje odmiany — blokuje tylko wybór pojęcia.**
+> **`locked` nie blokuje odmiany - blokuje tylko wybór pojęcia.**
 
 Przykład (język fleksyjny):
 - `term_target`: *Friseurstuhl*
@@ -110,7 +110,7 @@ Przykład (język fleksyjny):
 
 ---
 
-## 3) Translate — tłumaczenie + review + zapis
+## 3) Translate >> tłumaczenie + review + zapis
 W zakładce **Translate**:
 - wprowadzasz:
   - **Nazwa (PL)** – np. nazwa produktu,
@@ -135,7 +135,7 @@ System automatycznie:
 
 ---
 
-## 6) Translations Archive — archiwum tłumaczeń
+## 6) Translations Archive - archiwum tłumaczeń
 W archiwum:
 - każda wersja językowa ma **osobną zakładkę**,
 - widzisz:
@@ -152,7 +152,7 @@ W archiwum:
 ## Dobre praktyki (bardzo polecane)
 - Zacznij od Glossary (min. 30–80 kluczowych terminów `locked` na język).
 - Przy nowym języku zrób kilka pierwszych tłumaczeń „testowych”.
-- Jeśli widzisz powtarzający się błąd — **dodaj go do Glossary**, zamiast poprawiać ręcznie.
+- Jeśli widzisz powtarzający się błąd - **dodaj go do Glossary**, zamiast poprawiać ręcznie.
 """
 )
 
