@@ -1,6 +1,4 @@
 streamlit
 pandas
 openai
-anthropic
-google-generativeai
-protobuf<5
+google-genai
