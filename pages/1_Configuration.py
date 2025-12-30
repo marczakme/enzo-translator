@@ -3,19 +3,10 @@ import streamlit as st
 st.set_page_config(page_title="Configuration", layout="wide")
 st.header("1) Configuration")
 
-# Inicjalizacja stanu
-if "target_language" not in st.session_state:
-    st.session_state.target_language = "de"
-if "target_market_label" not in st.session_state:
-    st.session_state.target_market_label = "Niemiecki (DE)"
-if "style_hint" not in st.session_state:
-    st.session_state.style_hint = (
-        "Branża: profesjonalne wyposażenie fryzjerskie i kosmetyczne. "
-        "Ton: ekspercki, naturalny, bez marketingowego nadęcia."
-    )
-
-# Lista języków/rynków (BE jako rynek, nie „język”)
-LANG_OPTIONS = [
+# --------------------
+# Language selection
+# --------------------
+LANGS = [
     ("ro", "Rumuński (RO)"),
     ("hu", "Węgierski (HU)"),
     ("el", "Grecki (GR)"),
@@ -29,25 +20,40 @@ LANG_OPTIONS = [
     ("lt", "Litewski (LT)"),
     ("fi", "Fiński (FI)"),
     ("sv", "Szwedzki (SE)"),
-    ("nl", "Niderlandzki (BE) — Flandria"),
-    ("fr", "Francuski (BE) — Walonia/Bruksela"),
-    ("de", "Niemiecki (BE) — wspólnota niemieckojęzyczna"),
 ]
 
-# wyznacz index z session_state (po labelu, żeby działało też dla BE)
-labels = [x[1] for x in LANG_OPTIONS]
-default_label = st.session_state.get("target_market_label", "Niemiecki (DE)")
-default_index = labels.index(default_label) if default_label in labels else 0
+lang_labels = [label for _, label in LANGS]
+lang_codes = {label: code for code, label in LANGS}
 
-choice = st.selectbox("Język / rynek docelowy", options=LANG_OPTIONS, format_func=lambda x: x[1], index=default_index)
+chosen_lang = st.selectbox("Język / rynek docelowy", lang_labels)
 
-st.session_state.target_language = choice[0]      # kod języka (ISO)
-st.session_state.target_market_label = choice[1]  # label rynku do wyświetlania
+st.session_state.target_language = lang_codes[chosen_lang]
+st.session_state.target_market_label = chosen_lang
 
-st.session_state.style_hint = st.text_area(
-    "Wskazówki stylu / rynku (kontekst dla tłumaczenia)",
-    value=st.session_state.style_hint,
-    height=140
+# --------------------
+# LLM selection (Translate)
+# --------------------
+st.subheader("Model językowy")
+
+llm_translate = st.selectbox(
+    "Model do tłumaczenia (Translate)",
+    ["OpenAI", "Claude", "Gemini"],
+    index=0,
 )
 
-st.success(f"Zapisano w sesji: {st.session_state.target_market_label} (lang={st.session_state.target_language})")
+st.session_state.translate_provider = llm_translate.lower()
+
+st.caption(
+    "Uwaga: Review językowe jest zawsze wykonywane przez **Claude** "
+    "(stały benchmark jakości)."
+)
+
+# --------------------
+# Style / context
+# --------------------
+style_hint = st.text_area(
+    "Kontekst / styl (opcjonalnie)",
+    placeholder="np. sprzęt fryzjerski, ton profesjonalny, bez marketingowego lania wody",
+)
+
+st.session_state.style_hint = style_hint
