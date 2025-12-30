@@ -1,153 +1,202 @@
+import streamlit as st
+import pandas as pd
 import os
-from typing import Optional, List, Dict, Tuple
 
-from openai import OpenAI
-import anthropic
-import google.generativeai as genai
+from llm_providers import chat_llm, review_llm
+
+st.set_page_config(page_title="Benchmark", layout="wide")
+st.header("🧪 8) Benchmark — OpenAI vs Gemini vs Qwen | Review: Gemini")
+
+lang = st.session_state.get("target_language")
+label = st.session_state.get("target_market_label")
+style_hint_default = st.session_state.get("style_hint", "")
+
+if not lang:
+    st.warning("Najpierw wybierz język w Configuration.")
+    st.stop()
+
+st.subheader(f"Rynek: {label}")
+st.caption("Translate: OpenAI / Gemini / Qwen | Review: zawsze Gemini")
+
+def load_glossary_df(lang_code: str) -> pd.DataFrame:
+    path = f"data/glossary_{lang_code}.csv"
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["term_pl", "term_target", "locked", "notes"])
+    df = pd.read_csv(path)
+
+    for col in ["term_pl", "term_target", "locked", "notes"]:
+        if col not in df.columns:
+            df[col] = "" if col != "locked" else False
+
+    df["term_pl"] = df["term_pl"].astype(str).str.strip()
+    df["term_target"] = df["term_target"].astype(str).str.strip()
+    df["locked"] = df["locked"].apply(lambda x: str(x).strip().lower() in ["true", "1", "yes", "y", "t"])
+
+    df = df[(df["term_pl"].str.len() > 0) & (df["term_target"].str.len() > 0)].copy()
+    df = df.drop_duplicates(subset=["term_pl"], keep="last").reset_index(drop=True)
+    return df
+
+def filter_glossary_for_source(df: pd.DataFrame, source_text: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    src = (source_text or "").lower()
+
+    def appears(term: str) -> bool:
+        t = (term or "").strip().lower()
+        if len(t) <= 2:
+            return False
+        return t in src
+
+    mask_locked = df["locked"] == True
+    mask_appears = df["term_pl"].apply(appears)
+
+    filtered = df[mask_locked | mask_appears].copy()
+    filtered["__prio"] = filtered["locked"].apply(lambda x: 0 if x else 1)
+    filtered = filtered.sort_values(["__prio", "term_pl"]).drop(columns=["__prio"]).reset_index(drop=True)
+    return filtered
+
+def glossary_to_text(df: pd.DataFrame) -> str:
+    if df.empty:
+        return ""
+    return "\n".join([f"- {r['term_pl']} => {r['term_target']}" for _, r in df.iterrows()])
 
 
-def _join_messages(messages: List[Dict[str, str]]) -> Tuple[str, str]:
-    """
-    Build (system_text, user_text) from chat-like messages.
-    Ensures we never pass empty message content to Anthropic.
-    """
-    system_parts = []
-    user_parts = []
+col1, col2 = st.columns([1, 1])
+with col1:
+    title_pl = st.text_input("Nazwa (PL)", placeholder="np. Fotel fryzjerski Enzo X1")
+    temperature = st.slider("Temperature (Translate, wspólne)", 0.0, 0.8, 0.2, 0.05)
+with col2:
+    benchmark_context = st.text_area(
+        "Kontekst benchmarku (opcjonalnie)",
+        value=style_hint_default,
+        height=120,
+        help="Ten kontekst zostanie użyty identycznie dla OpenAI / Gemini / Qwen."
+    )
 
-    for m in messages:
-        role = (m.get("role") or "").lower().strip()
-        content = (m.get("content") or "").strip()
-        if not content:
-            continue  # critical: avoid empty content -> Anthropic 400
-        if role == "system":
-            system_parts.append(content)
-        else:
-            user_parts.append(content)
+body_pl = st.text_area("Dalsza treść (PL)", height=220)
 
-    system_text = "\n\n".join(system_parts).strip()
-    user_text = "\n\n".join(user_parts).strip()
+SYSTEM_TRANSLATE = "You are a professional translator. Translate precisely. Output plain text only."
+SYSTEM_REVIEW = "You are a senior linguistic reviewer."
 
-    if not user_text:
-        # absolutely never call Anthropic with empty user content
-        user_text = " "  # minimal non-empty; better than 400 crash
+def build_translate_prompt(source_text: str, glossary_block: str) -> str:
+    return f"""
+Target language: {label}
 
-    return system_text, user_text
+Context:
+{benchmark_context.strip() if benchmark_context.strip() else "None"}
 
+Mandatory terminology:
+{glossary_block if glossary_block else "None"}
 
-def _clip(text: str, max_chars: int) -> str:
-    if not text:
-        return text
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 200] + "\n\n[...truncated due to length...]\n"
+Rules:
+- Output plain text only (no HTML)
+- Preserve structure NAME/BODY
+- Use mandatory terminology when applicable
+- Keep numbers/units consistent
+- Do not add explanations
 
+Translate:
 
-def chat_llm(
-    provider: str,
-    messages: list,
-    temperature: float = 0.2,
-    model_hint: Optional[str] = None,
-) -> str:
-    """
-    Unified LLM interface.
-    provider: openai | claude | gemini
-    messages: [{"role": "system"|"user", "content": "..."}]
+{source_text}
+""".strip()
 
-    Claude notes:
-    - system is passed via `system=...` (correct Anthropic API usage)
-    - automatic model fallback to avoid 400 when a model isn't enabled for your key/account
-    """
+def build_review_prompt(source_text: str, translation: str, provider_name: str, glossary_block: str) -> str:
+    return f"""
+Compare translation quality objectively.
 
-    provider = provider.lower().strip()
-    system_text, user_text = _join_messages(messages)
+Mandatory terminology (must be respected):
+{glossary_block if glossary_block else "None"}
 
-    # Keep prompts bounded (helps with large glossary / long descriptions)
-    system_text = _clip(system_text, 6000)
-    user_text = _clip(user_text, 24000)
+Return format:
+VERDICT: OK / FIX
+ISSUES:
+- ...
+SUGGESTED FIXES:
+- ...
+CONFIDENCE: 0-100
 
-    # --------------------
-    # OpenAI
-    # --------------------
-    if provider == "openai":
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Brak OPENAI_API_KEY w secrets/ENV.")
+SOURCE:
+{source_text}
 
-        client = OpenAI(api_key=api_key)
-        model = model_hint or "gpt-4.1-mini"
+TRANSLATION ({provider_name}):
+{translation}
+""".strip()
 
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": system_text or "You are helpful."},
-                {"role": "user", "content": user_text},
-            ],
-        )
-        return resp.choices[0].message.content.strip()
+st.divider()
 
-    # --------------------
-    # Claude (Anthropic) with fallback
-    # --------------------
-    if provider == "claude":
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeError("Brak ANTHROPIC_API_KEY w secrets/ENV.")
+if st.button("Run benchmark", type="primary"):
+    if not ((title_pl or "").strip() or (body_pl or "").strip()):
+        st.warning("Uzupełnij nazwę lub treść.")
+        st.stop()
 
-        client = anthropic.Anthropic(api_key=api_key)
+    source = f"NAME:\n{title_pl.strip()}\n\nBODY:\n{body_pl.strip()}"
 
-        # If user provided a model_hint, try it first. Otherwise use a robust fallback chain.
-        # (Model availability varies by account/plan; this avoids hard failures.)
-        fallback_models = []
-        if model_hint:
-            fallback_models.append(model_hint)
+    gdf_all = load_glossary_df(lang)
+    gdf_filtered = filter_glossary_for_source(gdf_all, source)
+    glossary_block = glossary_to_text(gdf_filtered)
 
-        # Env override if you want a fixed model without changing code
-        env_model = os.environ.get("CLAUDE_MODEL")
-        if env_model:
-            fallback_models.insert(0, env_model)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Glossary: wszystkie wpisy", int(len(gdf_all)))
+    with c2:
+        st.metric("Glossary: użyte w benchmarku", int(len(gdf_filtered)))
+    with c3:
+        locked_count = int(gdf_all["locked"].sum()) if not gdf_all.empty else 0
+        st.metric("Glossary: locked (łącznie)", locked_count)
 
-        # Robust defaults (try modern aliases first, then dated IDs, then smaller model)
-        fallback_models += [
-            "claude-3-5-sonnet-latest",
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-sonnet-20240620",
-            "claude-3-haiku-20240307",
-        ]
+    providers = [("openai", "OpenAI"), ("gemini", "Gemini"), ("qwen", "Qwen")]
+    results = {}
 
-        last_err = None
-        for model in fallback_models:
-            try:
-                resp = client.messages.create(
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=4096,
-                    system=system_text if system_text else None,
-                    messages=[{"role": "user", "content": user_text}],
-                )
-                return resp.content[0].text.strip()
-            except anthropic.BadRequestError as e:
-                # usually model not enabled, or request shape issue; try next model
-                last_err = e
-                continue
+    with st.spinner("Tłumaczenie (OpenAI / Gemini / Qwen)…"):
+        for code, name in providers:
+            translated = chat_llm(
+                provider=code,
+                temperature=temperature,
+                messages=[
+                    {"role": "system", "content": SYSTEM_TRANSLATE},
+                    {"role": "user", "content": build_translate_prompt(source, glossary_block)},
+                ],
+            )
+            results[code] = {"translation": translated}
 
-        # If we exhausted fallbacks, raise the last error (Streamlit will still redact, but at least we tried)
-        raise last_err if last_err else RuntimeError("Claude call failed for unknown reasons.")
+    with st.spinner("Review (Gemini)…"):
+        for code, name in providers:
+            review = review_llm(
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content": SYSTEM_REVIEW},
+                    {"role": "user", "content": build_review_prompt(source, results[code]["translation"], name, glossary_block)},
+                ],
+            )
+            results[code]["review"] = review
 
-    # --------------------
-    # Gemini
-    # --------------------
-    if provider == "gemini":
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Brak GEMINI_API_KEY w secrets/ENV.")
+    st.session_state.benchmark = {
+        "context": benchmark_context,
+        "source": source,
+        "glossary_used": gdf_filtered.to_dict(orient="records"),
+        "results": results,
+    }
 
-        genai.configure(api_key=api_key)
-        model_name = model_hint or "gemini-1.5-pro"
-        model = genai.GenerativeModel(model_name)
+if "benchmark" in st.session_state:
+    st.subheader("Wyniki benchmarku")
 
-        prompt = (system_text + "\n\n" + user_text).strip() if system_text else user_text
-        resp = model.generate_content(prompt, generation_config={"temperature": temperature})
-        return (resp.text or "").strip()
+    with st.expander("Kontekst, źródło i glossary użyte w benchmarku", expanded=False):
+        st.markdown("**Kontekst:**")
+        st.code(st.session_state.benchmark["context"] if st.session_state.benchmark["context"].strip() else "None")
+        st.markdown("**Źródło (PL):**")
+        st.code(st.session_state.benchmark["source"])
 
-    raise ValueError(f"Nieznany provider LLM: {provider}")
+        g_used = st.session_state.benchmark.get("glossary_used", [])
+        if g_used:
+            st.markdown("**Glossary użyte:**")
+            st.dataframe(pd.DataFrame(g_used)[["term_pl", "term_target", "locked"]], width="stretch")
+
+    tabs = st.tabs(["OpenAI", "Gemini", "Qwen"])
+    mapping = [("openai", "OpenAI"), ("gemini", "Gemini"), ("qwen", "Qwen")]
+
+    for tab, (code, name) in zip(tabs, mapping):
+        with tab:
+            st.markdown(f"### Translation — {name}")
+            st.code(st.session_state.benchmark["results"][code]["translation"], language="text")
+            st.markdown("### Review (Gemini)")
+            st.code(st.session_state.benchmark["results"][code]["review"], language="text")
