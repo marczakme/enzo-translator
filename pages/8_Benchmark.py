@@ -11,7 +11,9 @@ st.markdown(
 Ten tryb pozwala **porównać jakość tłumaczeń** wykonanych przez różne modele językowe
 dla **tego samego tekstu**, przy **jednym, stałym reviewerze (Claude)**.
 
-➡️ Idealne do wyboru najlepszego modelu **per język / rynek**.
+✅ Translate: OpenAI / Claude / Gemini  
+✅ Review: zawsze Claude  
+✅ Ten sam prompt i ten sam kontekst dla wszystkich modeli (porównywalność)
 """
 )
 
@@ -21,7 +23,7 @@ dla **tego samego tekstu**, przy **jednym, stałym reviewerze (Claude)**.
 
 lang = st.session_state.get("target_language")
 label = st.session_state.get("target_market_label")
-style_hint = st.session_state.get("style_hint", "")
+style_hint_default = st.session_state.get("style_hint", "")
 
 if not lang:
     st.warning("Najpierw wybierz język w Configuration.")
@@ -51,68 +53,57 @@ glossary = load_glossary(lang)
 # Input
 # ======================================================
 
-title_pl = st.text_input("Nazwa (PL)", placeholder="np. Fotel fryzjerski Enzo X1")
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    title_pl = st.text_input("Nazwa (PL)", placeholder="np. Fotel fryzjerski Enzo X1")
+    temperature = st.slider("Temperature (dla wszystkich modeli)", 0.0, 0.8, 0.2, 0.05)
+
+with col2:
+    # ✅ NOWE: kontekst do benchmarku (domyślnie z Configuration)
+    benchmark_context = st.text_area(
+        "Kontekst benchmarku (opcjonalnie)",
+        value=style_hint_default,
+        height=120,
+        help="Ten kontekst zostanie użyty identycznie dla OpenAI / Claude / Gemini. "
+             "Jeśli puste — prompt działa bez dodatkowego kontekstu."
+    )
+
 body_pl = st.text_area("Dalsza treść (PL)", height=220)
 
-temperature = st.slider("Temperature (dla wszystkich modeli)", 0.0, 0.8, 0.2, 0.05)
+st.divider()
 
 # ======================================================
-# Benchmark
+# Prompt templates (IDENTICAL for all providers)
 # ======================================================
 
-if st.button("Run benchmark", type="primary"):
-    if not (title_pl or body_pl).strip():
-        st.warning("Uzupełnij nazwę lub treść.")
-        st.stop()
+SYSTEM_TRANSLATE = "You are a professional translator. Translate precisely. Output plain text only."
 
-    source = f"NAME:\n{title_pl}\n\nBODY:\n{body_pl}"
-
-    providers = ["openai", "claude", "gemini"]
-    results = {}
-
-    with st.spinner("Tłumaczenie (3 modele)…"):
-        for p in providers:
-            translated = chat_llm(
-                provider=p,
-                temperature=temperature,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a professional translator. Translate precisely. Output plain text only.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
+def build_translate_user_prompt(source_text: str) -> str:
+    return f"""
 Target language: {label}
 
 Context:
-{style_hint}
+{benchmark_context.strip() if benchmark_context.strip() else "None"}
 
 Mandatory terminology:
 {glossary if glossary else "None"}
 
-Translate and keep structure:
+Rules:
+- Output plain text only (no HTML)
+- Preserve structure NAME/BODY
+- Use mandatory terminology when applicable
+- Keep numbers/units consistent
 
-{source}
-""",
-                    },
-                ],
-            )
-            results[p] = {"translation": translated}
+Translate:
 
-    with st.spinner("Review (Claude)…"):
-        for p in providers:
-            review = chat_llm(
-                provider="claude",
-                temperature=0.1,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a senior linguistic reviewer.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
+{source_text}
+""".strip()
+
+SYSTEM_REVIEW = "You are a senior linguistic reviewer."
+
+def build_review_user_prompt(source_text: str, translation: str, provider_name: str) -> str:
+    return f"""
 Compare translation quality objectively.
 
 Return format:
@@ -124,32 +115,79 @@ SUGGESTED FIXES:
 CONFIDENCE: 0-100
 
 SOURCE:
-{source}
+{source_text}
 
-TRANSLATION ({p.upper()}):
-{results[p]["translation"]}
-""",
-                    },
+TRANSLATION ({provider_name}):
+{translation}
+""".strip()
+
+# ======================================================
+# Benchmark
+# ======================================================
+
+if st.button("Run benchmark", type="primary"):
+    if not ((title_pl or "").strip() or (body_pl or "").strip()):
+        st.warning("Uzupełnij nazwę lub treść.")
+        st.stop()
+
+    source = f"NAME:\n{title_pl.strip()}\n\nBODY:\n{body_pl.strip()}"
+
+    providers = [("openai", "OpenAI"), ("claude", "Claude"), ("gemini", "Gemini")]
+    results = {}
+
+    # Translate (3 models)
+    with st.spinner("Tłumaczenie (OpenAI / Claude / Gemini)…"):
+        for code, label_p in providers:
+            translated = chat_llm(
+                provider=code,
+                temperature=temperature,
+                messages=[
+                    {"role": "system", "content": SYSTEM_TRANSLATE},
+                    {"role": "user", "content": build_translate_user_prompt(source)},
                 ],
             )
-            results[p]["review"] = review
+            results[code] = {"translation": translated}
 
-    st.session_state.benchmark = results
+    # Review (always Claude)
+    with st.spinner("Review (Claude)…"):
+        for code, label_p in providers:
+            review = chat_llm(
+                provider="claude",
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content": SYSTEM_REVIEW},
+                    {"role": "user", "content": build_review_user_prompt(source, results[code]["translation"], label_p)},
+                ],
+            )
+            results[code]["review"] = review
+
+    # Save in session for display
+    st.session_state.benchmark = {
+        "context": benchmark_context,
+        "source": source,
+        "results": results
+    }
 
 # ======================================================
 # Output
 # ======================================================
 
 if "benchmark" in st.session_state:
-    st.divider()
     st.subheader("Wyniki benchmarku")
+
+    with st.expander("Zastosowany kontekst i źródło (dla porównywalności)", expanded=False):
+        st.markdown("**Kontekst:**")
+        st.code(st.session_state.benchmark["context"] if st.session_state.benchmark["context"].strip() else "None")
+        st.markdown("**Źródło (PL):**")
+        st.code(st.session_state.benchmark["source"])
 
     tabs = st.tabs(["OpenAI", "Claude", "Gemini"])
 
-    for tab, provider in zip(tabs, ["openai", "claude", "gemini"]):
+    mapping = [("openai", "OpenAI"), ("claude", "Claude"), ("gemini", "Gemini")]
+    for tab, (code, name) in zip(tabs, mapping):
         with tab:
-            st.markdown(f"### Translation — {provider.upper()}")
-            st.code(st.session_state.benchmark[provider]["translation"])
+            st.markdown(f"### Translation — {name}")
+            st.code(st.session_state.benchmark["results"][code]["translation"])
 
             st.markdown("### Review (Claude)")
-            st.code(st.session_state.benchmark[provider]["review"])
+            st.code(st.session_state.benchmark["results"][code]["review"])
